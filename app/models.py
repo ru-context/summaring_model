@@ -1,5 +1,5 @@
 def russian_model(text: str):
-    return f"{text}"
+    return f"ru {text}"
 
 def english_model(text: str):
-    return f"{text}"
+    return f"eng {text}"
