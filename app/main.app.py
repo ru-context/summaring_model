@@ -16,7 +16,7 @@ async def process_text(text_input: TextInput):
     text = text_input.text
     try:
         lang = detect(text)
-        logger.info(f"Определен язык: {lang} для текста: {text}")
+        logger.info(f"Поступил запрос на суммаризацию текста: {lang}")
     except Exception as e:
         logger.error(f"Ошибка при определении языка: {e}")
         raise HTTPException(status_code=400, detail="Не удалось определить язык текста")
