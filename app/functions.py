@@ -14,10 +14,9 @@ def calculate_summary_length(text: str, min_length: int = 30, max_length: int = 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     text = ""
     try:
-        # Открываем PDF из байтов
         doc = fitz.open(stream=file_bytes, filetype="pdf")
         for page in doc:
-            text += page.get_text()
+            text += page.get_text() # type: ignore
     except Exception as e:
         raise ValueError(f"Ошибка при чтении PDF: {e}")
     return text

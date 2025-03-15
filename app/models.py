@@ -7,7 +7,7 @@ def russian_model(text: str):
     try:
         summary_length = calculate_summary_length(text)
         result = russian_summarizer(text, max_length=summary_length, min_length=int(summary_length * 0.7), do_sample=False)
-        return result[0]['summary_text']
+        return result[0]['summary_text'] # type: ignore
     except Exception as e:
         return f"Ошибка при суммаризации текста: {e}"
 
@@ -15,6 +15,6 @@ def english_model(text: str):
     try:
         summary_length = calculate_summary_length(text)
         result = english_summarizer(text, max_length=summary_length, min_length=int(summary_length * 0.7), do_sample=False)
-        return result[0]['summary_text']
+        return result[0]['summary_text'] # type: ignore
     except Exception as e:
         return f"Ошибка при суммаризации текста: {e}"
