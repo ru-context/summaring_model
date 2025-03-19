@@ -34,7 +34,7 @@ def calculate_importance_with_bert(text: str) -> float:
     try:
         features = nlp(text)
         importance = np.mean([np.mean(f) for f in features]) # type: ignore
-        return importance
+        return importance # type: ignore
     except:
         return 0
 
