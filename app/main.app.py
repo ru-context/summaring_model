@@ -3,8 +3,9 @@ from pydantic import BaseModel
 from typing import Union
 from langdetect import detect
 from models import russian_model, english_model
-from functions import extract_text_from_pdf
+from functions import extract_text_from_file
 import logging
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,10 +38,8 @@ async def process(
         if file:
             try:
                 contents = await file.read()
-                if file.filename.endswith(".pdf"):  # type: ignore
-                    content = extract_text_from_pdf(contents)
-                else:
-                    content = contents.decode("utf-8")
+                file_extension = os.path.splitext(file.filename)[1]  # type: ignore
+                content = extract_text_from_file(contents, file_extension)
                 logger.info(f"Текст из файла: {content[:100]}...")
             except Exception as e:
                 logger.error(f"Ошибка при чтении файла: {e}")

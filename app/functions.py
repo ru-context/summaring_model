@@ -81,12 +81,17 @@ def complete_sentence(text: str) -> str:
             text = text[:last_punctuation + 1]
     return text
 
-def extract_text_from_pdf(file_bytes: bytes) -> str:
+def extract_text_from_file(file_bytes: bytes, file_extension: str) -> str:
     text = ""
     try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        for page in doc:
-            text += page.get_text() # type: ignore
+        if file_extension == ".pdf":
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+            for page in doc:
+                text += page.get_text() # type: ignore
+        elif file_extension in [".txt", ".md"]:
+            text = file_bytes.decode("utf-8")
+        else:
+            raise ValueError(f"Unsupported file type: {file_extension}")
     except Exception as e:
-        raise ValueError(f"Ошибка при чтении PDF: {e}")
+        raise ValueError(f"Ошибка при чтении файла: {e}")
     return text
