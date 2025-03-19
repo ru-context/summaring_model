@@ -1,8 +1,8 @@
+import fitz
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
 import numpy as np
-import fitz
 
 def calculate_text_complexity(text: str) -> float:
     words = text.split()
@@ -40,38 +40,23 @@ def calculate_importance_with_bert(text: str) -> float:
 
 def calculate_adaptive_summary_length(
     text: str,
-    min_length: int = 30,
-    max_length: int = 130,
-    complexity_weight: float = 0.4,
-    importance_weight: float = 0.3,
-    topic_weight: float = 0.2,
+    min_length: int = 50,
+    max_length: int = 150,
+    complexity_weight: float = 0.6,
+    importance_weight: float = 0.2,
+    topic_weight: float = 0.1,
     bert_weight: float = 0.1,
 ) -> int:
-    """
-    Универсальная функция для расчета адаптивной длины сокращения текста.
-
-    :param text: Входной текст для суммаризации.
-    :param min_length: Минимальная длина сокращения.
-    :param max_length: Максимальная длина сокращения.
-    :param complexity_weight: Вес сложности текста.
-    :param importance_weight: Вес важности предложений.
-    :param topic_weight: Вес тематики текста.
-    :param bert_weight: Вес важности текста по BERT.
-    :return: Адаптивная длина сокращения.
-    """
-    # Рассчитываем факторы
     complexity = calculate_text_complexity(text)
     importance = calculate_important_sentences(text)
     topic = classify_topic(text)
     bert_importance = calculate_importance_with_bert(text)
 
-    # Нормализация факторов
     complexity_norm = complexity
     importance_norm = importance
     topic_norm = 1.0 if topic == "technical" else 0.5
     bert_norm = bert_importance
 
-    # Комбинируем факторы с весами
     combined_score = (
         complexity_norm * complexity_weight +
         importance_norm * importance_weight +
@@ -79,17 +64,22 @@ def calculate_adaptive_summary_length(
         bert_norm * bert_weight
     )
 
-    # Рассчитываем длину сокращения
     text_length = len(text.split())
     summary_length = int(text_length * 0.3 * combined_score)
 
-    # Ограничиваем длину в пределах min_length и max_length
     if summary_length < min_length:
         return min_length
     elif summary_length > max_length:
         return max_length
     else:
         return summary_length
+
+def complete_sentence(text: str) -> str:
+    if not text.endswith(('.', '!', '?')):
+        last_punctuation = max(text.rfind('.'), text.rfind('!'), text.rfind('?'))
+        if last_punctuation != -1:
+            text = text[:last_punctuation + 1]
+    return text
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     text = ""
