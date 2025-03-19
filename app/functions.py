@@ -1,8 +1,10 @@
 import fitz
+import requests
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
 import numpy as np
+from bs4 import BeautifulSoup
 
 def calculate_text_complexity(text: str) -> float:
     words = text.split()
@@ -80,6 +82,17 @@ def complete_sentence(text: str) -> str:
         if last_punctuation != -1:
             text = text[:last_punctuation + 1]
     return text
+
+def extract_text_from_url(url: str) -> str:
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+        text = soup.get_text(separator=' ', strip=True)
+        return text
+    except Exception as e:
+        raise ValueError(f"Ошибка при извлечении текста с URL: {e}")
 
 def extract_text_from_file(file_bytes: bytes, file_extension: str) -> str:
     text = ""
