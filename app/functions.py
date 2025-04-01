@@ -1,11 +1,62 @@
 import fitz
+import uuid
 import requests
+import numpy as np
+
+from bs4 import BeautifulSoup # type: ignore
+from transformers import pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from transformers import pipeline
-import numpy as np
-from bs4 import BeautifulSoup # type: ignore
+from sentence_transformers import SentenceTransformer
 
+from typing import List, Dict
+
+'''
+Создаем класс для векторизации текста из pdf файлов и его дальнейшего сохранения в bd
+'''
+class VectorBookDatabase:
+    def __init__(self, persist_dir: str = "./chroma_db"):
+        self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        self.client = chromadb.PersistentClient(path=persist_dir)
+        self.collection = self.client.get_or_create_collection(
+            name="book_chunks",
+            metadata={"hnsw:space": "cosine"}
+        )
+
+    def add_book_chunks(self, book_id: str, chunks: List[str], metadata: List[Dict] = None):
+        """Добавляет фрагменты книги в базу данных"""
+        if not metadata:
+            metadata = [{"book_id": book_id} for _ in chunks]
+
+        embeddings = self.embedder.encode(chunks).tolist()
+        ids = [str(uuid.uuid4()) for _ in chunks]
+
+        self.collection.add(
+            ids=ids,
+            embeddings=embeddings,
+            documents=chunks,
+            metadatas=metadata
+        )
+
+    def search_similar_chunks(self, query: str, book_id: str = None, top_k: int = 5):
+        """Ищет наиболее релевантные фрагменты текста"""
+        query_embedding = self.embedder.encode(query).tolist()
+
+        filters = {}
+        if book_id:
+            filters = {"book_id": book_id}
+
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+            where=filters
+        )
+
+        return results['documents'], results['metadatas']
+
+'''
+Тут код для корректной работы суммаризации и генерации адаптивной длины ответа
+'''
 def calculate_text_complexity(text: str) -> float:
     words = text.split()
     unique_words = set(words)

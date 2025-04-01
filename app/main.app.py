@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Depends
 from pydantic import BaseModel
 from typing import Union
+from models import QASystem
 from langdetect import detect
 from models import russian_model, english_model
 from functions import extract_text_from_file, extract_text_from_url
@@ -12,6 +13,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+qa_system = QASystem()
 
 class TextInput(BaseModel):
     text: str
@@ -25,6 +27,35 @@ def is_valid_url(url: str) -> bool:
         r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+(?:[A-Z]{2,6}\.?|[A-Z0-9-]{2,}\.?)'
         r'(?:/?|[/?]\S+)$', re.IGNORECASE)
     return re.match(regex, url) is not None
+
+@app.post("/upload_book/")
+async def upload_book(file: UploadFile = File(...), book_id: str = None):
+    try:
+        contents = await file.read()
+        text = extract_text_from_file(contents, os.path.splitext(file.filename)[1])
+        chunks = split_text_into_chunks(text)
+
+        if not book_id:
+            book_id = file.filename
+
+        qa_system.vector_db.add_book_chunks(book_id, chunks)
+        return {"status": "success", "book_id": book_id, "chunks": len(chunks)}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/ask/")
+async def ask_question(question: str, book_id: str = None):
+    try:
+        result = qa_system.answer_question(question, book_id)
+        return {
+            "question": question,
+            "answer": result["answer"],
+            "confidence": result["score"],
+            "sources": result["context"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/process/")
 async def process(
