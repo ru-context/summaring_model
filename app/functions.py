@@ -4,7 +4,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import pipeline
 import numpy as np
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup # type: ignore
 
 def calculate_text_complexity(text: str) -> float:
     words = text.split()
