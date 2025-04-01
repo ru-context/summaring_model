@@ -1,6 +1,8 @@
 import fitz
+import faiss
 import uuid
 import requests
+import chromadb
 import numpy as np
 
 from bs4 import BeautifulSoup # type: ignore
@@ -8,6 +10,7 @@ from transformers import pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
+from chromadb.utils import embedding_functions
 
 from typing import List, Dict
 
@@ -15,44 +18,36 @@ from typing import List, Dict
 Создаем класс для векторизации текста из pdf файлов и его дальнейшего сохранения в bd
 '''
 class VectorBookDatabase:
-    def __init__(self, persist_dir: str = "./chroma_db"):
+    def __init__(self):
         self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
-        self.client = chromadb.PersistentClient(path=persist_dir)
-        self.collection = self.client.get_or_create_collection(
-            name="book_chunks",
-            metadata={"hnsw:space": "cosine"}
-        )
+        self.index = AnnoyIndex(384, 'angular')  # 384 - размерность all-MiniLM-L6-v2
+        self.texts = []
+        self.metadata = []
+        self.current_id = 0
 
     def add_book_chunks(self, book_id: str, chunks: List[str], metadata: List[Dict] = None):
-        """Добавляет фрагменты книги в базу данных"""
         if not metadata:
             metadata = [{"book_id": book_id} for _ in chunks]
 
-        embeddings = self.embedder.encode(chunks).tolist()
-        ids = [str(uuid.uuid4()) for _ in chunks]
+        for chunk, meta in zip(chunks, metadata):
+            embedding = self.embedder.encode(chunk)
+            self.index.add_item(self.current_id, embedding)
+            self.texts.append(chunk)
+            self.metadata.append(meta)
+            self.current_id += 1
 
-        self.collection.add(
-            ids=ids,
-            embeddings=embeddings,
-            documents=chunks,
-            metadatas=metadata
-        )
+        self.index.build(10)  # 10 деревьев
 
     def search_similar_chunks(self, query: str, book_id: str = None, top_k: int = 5):
-        """Ищет наиболее релевантные фрагменты текста"""
-        query_embedding = self.embedder.encode(query).tolist()
+        query_embedding = self.embedder.encode(query)
+        indices = self.index.get_nns_by_vector(query_embedding, top_k)
 
-        filters = {}
-        if book_id:
-            filters = {"book_id": book_id}
+        results = []
+        for idx in indices:
+            if book_id is None or self.metadata[idx]["book_id"] == book_id:
+                results.append((self.texts[idx], self.metadata[idx]))
 
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            where=filters
-        )
-
-        return results['documents'], results['metadatas']
+        return [r[0] for r in results], [r[1] for r in results]
 
 '''
 Тут код для корректной работы суммаризации и генерации адаптивной длины ответа
@@ -159,3 +154,11 @@ def extract_text_from_file(file_bytes: bytes, file_extension: str) -> str:
     except Exception as e:
         raise ValueError(f"Ошибка при чтении файла: {e}")
     return text
+
+def split_text_into_chunks(text: str, chunk_size=1000, chunk_overlap=200):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        length_function=len,
+    )
+    return splitter.split_text(text)

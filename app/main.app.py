@@ -5,7 +5,11 @@ from models import QASystem
 from langdetect import detect
 from models import russian_model, english_model
 from functions import extract_text_from_file, extract_text_from_url
+from sklearn.metrics.pairwise import cosine_similarity
+
+import numpy as np
 import logging
+import torch
 import os
 import re
 
@@ -38,7 +42,7 @@ async def upload_book(file: UploadFile = File(...), book_id: str = None):
         if not book_id:
             book_id = file.filename
 
-        qa_system.vector_db.add_book_chunks(book_id, chunks)
+        qa_system.add_book_chunks(book_id, chunks)  # Теперь метод принадлежит QASystem
         return {"status": "success", "book_id": book_id, "chunks": len(chunks)}
 
     except Exception as e:

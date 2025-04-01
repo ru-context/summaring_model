@@ -1,43 +1,56 @@
 from transformers import pipeline
-from vector_db import VectorBookDatabase
-from langchain.chains import RetrievalQA
-from langchain.llms import HuggingFacePipeline
 from functions import calculate_adaptive_summary_length, complete_sentence
-english_summarizer = pipeline("summarization", model="t5-small")
-russian_summarizer = pipeline("summarization", model="IlyaGusev/rut5_base_sum_gazeta")
+english_summarizer = pipeline("summarization", model="t5-small", timeout=30)
+russian_summarizer = pipeline("summarization", model="IlyaGusev/rut5_base_sum_gazeta", timeout=30)
 
 '''
 Класс для работы Explainable function
 '''
 class QASystem:
     def __init__(self):
-        self.vector_db = VectorBookDatabase()
         self.qa_pipeline = pipeline(
             "question-answering",
             model="deepset/roberta-base-squad2"
         )
-        # Или используем LangChain для более сложных сценариев
-        self.retrieval_qa = RetrievalQA.from_chain_type(
-            llm=HuggingFacePipeline.from_model_id(
-                model_id="gpt2",
-                task="text-generation",
-                pipeline_kwargs={"max_length": 100}
-            ),
-            chain_type="stuff",
-            retriever=self.vector_db.as_retriever()
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+        self.model = AutoModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+        self.text_chunks = []
+        self.metadata = []
+
+    def add_book_chunks(self, book_id: str, chunks: list[str]):
+        self.text_chunks.extend(chunks)
+        self.metadata.extend([{"book_id": book_id} for _ in chunks])
+
+    def _get_embeddings(self, texts: list[str]):
+        inputs = self.tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        return outputs.last_hidden_state.mean(dim=1).numpy()
 
     def answer_question(self, question: str, book_id: str = None):
-        # Получаем релевантные фрагменты
-        chunks, _ = self.vector_db.search_similar_chunks(question, book_id)
-        context = " ".join(chunks)
+        # Получаем эмбеддинги для всех чанков
+        chunk_embeddings = self._get_embeddings(self.text_chunks)
+        question_embedding = self._get_embeddings([question])
 
-        # Получаем ответ на вопрос
+        # Вычисляем схожесть
+        similarities = cosine_similarity(question_embedding, chunk_embeddings)[0]
+
+        # Фильтруем по book_id если нужно
+        valid_indices = [
+            i for i, meta in enumerate(self.metadata)
+            if book_id is None or meta["book_id"] == book_id
+        ]
+        top_indices = np.argsort(similarities[valid_indices])[-5:][::-1]
+
+        # Получаем контекст
+        context = " ".join([self.text_chunks[valid_indices[i]] for i in top_indices])
+
+        # Получаем ответ
         result = self.qa_pipeline(question=question, context=context)
         return {
             "answer": result['answer'],
             "score": result['score'],
-            "context": chunks
+            "context": [self.text_chunks[valid_indices[i]] for i in top_indices]
         }
 
 '''
