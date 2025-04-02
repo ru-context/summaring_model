@@ -5,18 +5,27 @@ from models import QASystem
 from langdetect import detect
 from models import russian_model, english_model
 from functions import extract_text_from_file, extract_text_from_url
+from functions import split_text_into_chunks, extract_text_from_pdf
 from sklearn.metrics.pairwise import cosine_similarity
 
+from typing import List, Dict, Optional
+
 import numpy as np
+import requests
 import logging
 import torch
+import uuid
 import os
 import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
+app = FastAPI(
+    title="PDF QA System",
+    description="System for processing PDFs and answering questions about their content",
+    version="1.0"
+)
 qa_system = QASystem()
 
 class TextInput(BaseModel):
@@ -25,6 +34,26 @@ class TextInput(BaseModel):
 class UrlInput(BaseModel):
     url: str
 
+class UploadResponse(BaseModel):
+    book_id: str
+    status: str
+    chunks: int
+
+class QuestionRequest(BaseModel):
+    question: str
+    book_id: str
+    top_k: Optional[int] = 3
+
+class QuestionResponse(BaseModel):
+    answer: str
+    confidence: float
+    sources: List[str]
+    source_scores: List[float]
+
+class SummaryRequest(BaseModel):
+    book_id: str
+    max_length: Optional[int] = 150
+
 def is_valid_url(url: str) -> bool:
     regex = re.compile(
         r'^(?:http|ftp)s?://'
@@ -32,34 +61,63 @@ def is_valid_url(url: str) -> bool:
         r'(?:/?|[/?]\S+)$', re.IGNORECASE)
     return re.match(regex, url) is not None
 
-@app.post("/upload_book/")
-async def upload_book(file: UploadFile = File(...), book_id: str = None):
+@app.post("/upload/", response_model=UploadResponse)
+async def upload_pdf(file: UploadFile = File(...)):
     try:
+        # Generate unique book ID
+        book_id = str(uuid.uuid4())
+
+        # Read and process file
         contents = await file.read()
-        text = extract_text_from_file(contents, os.path.splitext(file.filename)[1])
-        chunks = split_text_into_chunks(text)
+        chunks_count = qa_system.process_pdf(book_id, contents)
 
-        if not book_id:
-            book_id = file.filename
-
-        qa_system.add_book_chunks(book_id, chunks)  # Теперь метод принадлежит QASystem
-        return {"status": "success", "book_id": book_id, "chunks": len(chunks)}
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.post("/ask/")
-async def ask_question(question: str, book_id: str = None):
-    try:
-        result = qa_system.answer_question(question, book_id)
         return {
-            "question": question,
-            "answer": result["answer"],
-            "confidence": result["score"],
-            "sources": result["context"]
+            "book_id": book_id,
+            "status": "success",
+            "chunks": chunks_count
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/ask/", response_model=QuestionResponse)
+async def ask_question(request: QuestionRequest):
+    try:
+        result = qa_system.answer_question(
+            question=request.question,
+            book_id=request.book_id,
+            top_k=request.top_k
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/summarize/")
+async def summarize_book(request: SummaryRequest):
+    try:
+        summary = qa_system.summarize_book(
+            book_id=request.book_id,
+            max_length=request.max_length
+        )
+        return {"summary": summary}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/books/")
+async def list_books():
+    # This would need a method in VectorBookDatabase to list available books
+    books = []
+    for file in os.listdir("vector_storage"):
+        if file.endswith(".faiss"):
+            books.append(file.replace(".faiss", ""))
+    return {"books": books}
+
+@app.delete("/books/{book_id}")
+async def delete_book(book_id: str):
+    try:
+        qa_system.vector_db.delete_book(book_id)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 @app.post("/process/")
 async def process(

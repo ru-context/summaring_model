@@ -1,4 +1,3 @@
-import os
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from pydantic import BaseModel
 import PyPDF2
@@ -6,28 +5,34 @@ import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 import uuid
+import os
 
 app = FastAPI()
 
-# Инициализация модели (используем sentence-transformers напрямую)
+# Инициализация модели
 try:
-    # Явно указываем использование PyTorch
-    embedding_model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2', device='cpu')
+    print("Загрузка модели...")
+    embedding_model = SentenceTransformer(
+        'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2',
+        device='cpu'
+    ) # type: ignore
+    print("Модель успешно загружена!")
 except Exception as e:
-    raise RuntimeError(f"Не удалось загрузить модель: {str(e)}")
+    print(f"Ошибка загрузки модели: {str(e)}")
+    raise
 
-# Хранилище для индексов
-faiss_indices = {}
+# Конфигурация хранилища
 FAISS_STORAGE = "faiss_storage"
 os.makedirs(FAISS_STORAGE, exist_ok=True)
 
 class QuestionRequest(BaseModel):
     question: str
 
-def extract_text_from_pdf(file):
-    """Извлечение текста из PDF"""
-    pdf_reader = PyPDF2.PdfReader(file)
-    return " ".join(page.extract_text() for page in pdf_reader.pages)
+def extract_text_from_pdf(file_path: str) -> str:
+    """Извлекает текст из PDF файла"""
+    with open(file_path, "rb") as f:
+        reader = PyPDF2.PdfReader(f)
+        return " ".join(page.extract_text() or "" for page in reader.pages)
 
 @app.post("/upload_pdf/")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -35,23 +40,27 @@ async def upload_pdf(file: UploadFile = File(...)):
         # Сохраняем временный файл
         temp_path = f"temp_{uuid.uuid4()}.pdf"
         with open(temp_path, "wb") as f:
-            f.write(file.file.read())
+            f.write(await file.read())
 
         # Извлекаем текст
         text = extract_text_from_pdf(temp_path)
-        os.remove(temp_path)  # Удаляем временный файл
+        os.remove(temp_path)
 
-        # Разбиваем текст на чанки
+        # Разбиваем на чанки
         chunk_size = 500
-        chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+        chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size) if text[i:i+chunk_size]]
 
         # Создаем эмбеддинги
-        embeddings = embedding_model.encode(chunks, show_progress_bar=False)
+        if not chunks:
+            raise HTTPException(status_code=400, detail="Не удалось извлечь текст из PDF")
 
-        # Создаем FAISS индекс
+        print(f"Создание эмбеддингов для {len(chunks)} чанков...")
+        embeddings = embedding_model.encode(chunks, show_progress_bar=True)
+
+        # Создаем индекс FAISS
         dimension = embeddings.shape[1]
         index = faiss.IndexFlatL2(dimension)
-        index.add(embeddings.astype(np.float32))
+        index.add(embeddings.astype(np.float32)) # type: ignore
 
         # Сохраняем индекс
         db_id = str(uuid.uuid4())
@@ -70,7 +79,10 @@ async def upload_pdf(file: UploadFile = File(...)):
 async def ask_question(db_id: str, request: QuestionRequest):
     try:
         # Проверяем существование файлов
-        if not os.path.exists(f"{FAISS_STORAGE}/{db_id}.index"):
+        if not all([
+            os.path.exists(f"{FAISS_STORAGE}/{db_id}.index"),
+            os.path.exists(f"{FAISS_STORAGE}/{db_id}_chunks.txt")
+        ]):
             raise HTTPException(status_code=404, detail="База не найдена")
 
         # Загружаем индекс
@@ -84,19 +96,27 @@ async def ask_question(db_id: str, request: QuestionRequest):
         question_embedding = embedding_model.encode([request.question])
 
         # Ищем в индексе
-        k = min(3, len(chunks))  # Не больше чем есть чанков
+        k = min(3, len(chunks))
         distances, indices = index.search(question_embedding.astype(np.float32), k)
 
-        # Формируем ответ
-        results = []
-        for i, dist in zip(indices[0], distances[0]):
-            results.append({
-                "text": chunks[i],
-                "score": float(dist),
-                "chunk_id": int(i)
-            })
-
-        return {"question": request.question, "results": results}
+        return {
+            "question": request.question,
+            "results": [
+                {
+                    "text": chunks[i],
+                    "score": float(dist),
+                    "chunk_id": int(i)
+                } for i, dist in zip(indices[0], distances[0])
+            ]
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/")
+async def health_check():
+    return {"status": "ok", "message": "Сервер работает"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

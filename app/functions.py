@@ -1,6 +1,7 @@
 import fitz
 import faiss
 import uuid
+import json
 import requests
 import chromadb
 import numpy as np
@@ -8,46 +9,107 @@ import numpy as np
 from bs4 import BeautifulSoup # type: ignore
 from transformers import pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 from chromadb.utils import embedding_functions
 
-from typing import List, Dict
+from typing import List, Dict, Tuple
+from pathlib import Path
 
 '''
 Создаем класс для векторизации текста из pdf файлов и его дальнейшего сохранения в bd
 '''
 class VectorBookDatabase:
-    def __init__(self):
+    def __init__(self, storage_dir: str = "vector_storage"):
+        self.storage_dir = Path(storage_dir)
+        self.storage_dir.mkdir(exist_ok=True)
         self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
-        self.index = AnnoyIndex(384, 'angular')  # 384 - размерность all-MiniLM-L6-v2
-        self.texts = []
-        self.metadata = []
-        self.current_id = 0
+        self.loaded_books = {}
 
-    def add_book_chunks(self, book_id: str, chunks: List[str], metadata: List[Dict] = None):
-        if not metadata:
-            metadata = [{"book_id": book_id} for _ in chunks]
+    def _get_index_path(self, book_id: str) -> Path:
+        return self.storage_dir / f"{book_id}.faiss"
 
-        for chunk, meta in zip(chunks, metadata):
-            embedding = self.embedder.encode(chunk)
-            self.index.add_item(self.current_id, embedding)
-            self.texts.append(chunk)
-            self.metadata.append(meta)
-            self.current_id += 1
+    def _get_meta_path(self, book_id: str) -> Path:
+        return self.storage_dir / f"{book_id}.json"
 
-        self.index.build(10)  # 10 деревьев
+    def book_exists(self, book_id: str) -> bool:
+        return self._get_index_path(book_id).exists()
 
-    def search_similar_chunks(self, query: str, book_id: str = None, top_k: int = 5):
-        query_embedding = self.embedder.encode(query)
-        indices = self.index.get_nns_by_vector(query_embedding, top_k)
+    def add_book(self, book_id: str, text: str, chunk_size: int = 1000, chunk_overlap: int = 200) -> int:
+        if self.book_exists(book_id):
+            raise ValueError(f"Book {book_id} already exists")
 
-        results = []
-        for idx in indices:
-            if book_id is None or self.metadata[idx]["book_id"] == book_id:
-                results.append((self.texts[idx], self.metadata[idx]))
+        # Split text into chunks
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            length_function=len,
+        )
+        chunks = splitter.split_text(text)
 
-        return [r[0] for r in results], [r[1] for r in results]
+        # Generate embeddings
+        embeddings = self.embedder.encode(chunks)
+        dimension = embeddings.shape[1]
+
+        # Create and save FAISS index
+        index = faiss.IndexFlatL2(dimension)
+        index.add(embeddings)
+        faiss.write_index(index, str(self._get_index_path(book_id)))
+
+        # Save metadata
+        metadata = {
+            "chunks": chunks,
+            "embeddings_shape": embeddings.shape,
+            "chunk_size": chunk_size,
+            "chunk_overlap": chunk_overlap
+        }
+        with open(self._get_meta_path(book_id), 'w') as f:
+            json.dump(metadata, f)
+
+        return len(chunks)
+
+    def load_book(self, book_id: str) -> Tuple[faiss.Index, List[str]]:
+        if book_id in self.loaded_books:
+            return self.loaded_books[book_id]
+
+        index = faiss.read_index(str(self._get_index_path(book_id)))
+        with open(self._get_meta_path(book_id), 'r') as f:
+            metadata = json.load(f)
+
+        self.loaded_books[book_id] = (index, metadata["chunks"])
+        return index, metadata["chunks"]
+
+    def search_similar_chunks(self, query: str, book_id: str, top_k: int = 5) -> Tuple[List[str], List[float]]:
+        index, chunks = self.load_book(book_id)
+        query_embedding = self.embedder.encode([query])
+
+        distances, indices = index.search(query_embedding, top_k)
+        results = [chunks[i] for i in indices[0]]
+        scores = [float(1 - distances[0][i]) for i in range(len(indices[0]))]  # Convert to similarity score
+
+        return results, scores
+
+    def delete_book(self, book_id: str) -> None:
+        paths = [
+            self._get_index_path(book_id),
+            self._get_meta_path(book_id)
+        ]
+        for path in paths:
+            if path.exists():
+                path.unlink()
+        self.loaded_books.pop(book_id, None)
+
+def extract_text_from_pdf(file_bytes: bytes) -> str:
+    """Extract text from PDF with proper error handling and formatting"""
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        text = []
+        for page in doc:
+            text.append(page.get_text())
+        return "\n".join(text)
+    except Exception as e:
+        raise ValueError(f"Failed to extract text from PDF: {str(e)}")
 
 '''
 Тут код для корректной работы суммаризации и генерации адаптивной длины ответа
