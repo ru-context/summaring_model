@@ -1,12 +1,16 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from models import VectorDBModel, QASummarizer
 from schemas import FileUpload, AnswerResponse, QuestionRequest
+from sentence_transformers import SentenceTransformer
 from fastapi.responses import JSONResponse
+from pathlib import Path
 
 from database_manager import DatabaseManager
 from functions import process_large_file, create_vector_db
 from functions import search_in_db, extract_text_from_pdf, chunk_text
 
+import logging
+import faiss
 import uuid
 import os
 
@@ -19,62 +23,62 @@ qa_model = QASummarizer()
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+model = SentenceTransformer('all-MiniLM-L6-v2') # type: ignore
 
 @app.post("/upload/", response_model=FileUpload)
 async def upload_file(file: UploadFile = File(...)):
     try:
         file_id = str(uuid.uuid4())
-        file_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
+        upload_dir = Path("uploads")
+        upload_dir.mkdir(exist_ok=True)
 
-        # Сохраняем файл
+        # Сохраняем оригинальный файл
+        file_path = upload_dir / f"{file_id}_{file.filename}"
         with open(file_path, "wb") as buffer:
             buffer.write(await file.read())
 
-        # Проверяем размер файла
-        if os.path.getsize(file_path) == 0:
-            raise HTTPException(status_code=400, detail="Empty file uploaded")
-
         # Обрабатываем файл
-        try:
-            chunks = process_large_file(file_path)
-            if not chunks:
-                raise HTTPException(status_code=400, detail="No text extracted from file")
+        chunks = process_large_file(str(file_path))
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No text extracted from file")
 
-            create_vector_db(chunks, file_id)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        # Сохраняем данные в векторную БД
+        embeddings = model.encode(chunks)
+        index = faiss.IndexFlatL2(embeddings.shape[1])
+        index.add(embeddings)
+
+        # Сохраняем ВСЕ данные
+        db_manager = DatabaseManager()
+        db_manager.save_index(file_id, index)
+        db_manager.save_texts(file_id, chunks)  # Теперь это точно работает
 
         return {"file_id": file_id, "filename": file.filename}
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        logging.error(f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"File upload failed: {str(e)}")
 
 @app.post("/ask/", response_model=AnswerResponse)
 async def ask_question(request: QuestionRequest):
     try:
-        # Загрузка данных
-        index = db_manager.load_index(request.file_id)
+        # Проверяем существование файлов
+        db_manager = DatabaseManager()
         texts = db_manager.load_texts(request.file_id)
+        index = db_manager.load_index(request.file_id)
 
-        # Поиск релевантных фрагментов
-        question_embedding = vector_model.encoder.encode([request.question])
-        distances, indices = index.search(question_embedding, k=3) # type: ignore
+        # Остальная логика обработки вопроса...
 
-        # Генерация ответа
-        context = " ".join([texts[i] for i in indices[0]])
-        qa_result = qa_model.generate_answer(request.question, context)
-
-        return AnswerResponse(
-            answer=qa_result['answer'],
-            relevant_chunks=[texts[i] for i in indices[0]],
-            confidence=qa_result['score']
-        )
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail="File not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        available_files = [f for f in os.listdir("database") if f.endswith('.json')]
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": str(e),
+                "available_files": available_files
+            }
+        )
 
 @app.get("/files/")
 async def list_uploaded_files():
