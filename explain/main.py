@@ -1,13 +1,22 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from models import VectorDBModel, QASummarizer
+from schemas import FileUpload, AnswerResponse, QuestionRequest
 from fastapi.responses import JSONResponse
+
+from database_manager import DatabaseManager
+from functions import process_large_file, create_vector_db
+from functions import search_in_db, extract_text_from_pdf, chunk_text
+
 import uuid
 import os
+
 from typing import List
-from models import FileUpload, QuestionRequest, AnswerResponse
-from functions import process_large_file, create_vector_db
-from functions import search_in_db
 
 app = FastAPI()
+db_manager = DatabaseManager()
+vector_model = VectorDBModel()
+qa_model = QASummarizer()
+
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -45,19 +54,25 @@ async def upload_file(file: UploadFile = File(...)):
 @app.post("/ask/", response_model=AnswerResponse)
 async def ask_question(request: QuestionRequest):
     try:
+        # Загрузка данных
+        index = db_manager.load_index(request.file_id)
+        texts = db_manager.load_texts(request.file_id)
+
         # Поиск релевантных фрагментов
-        relevant_chunks = search_in_db(request.question, request.file_id)
+        question_embedding = vector_model.encoder.encode([request.question])
+        distances, indices = index.search(question_embedding, k=3) # type: ignore
 
-        # Здесь должна быть ваша логика суммаризации/ответа на вопрос
-        # Для примера просто соединим релевантные фрагменты
-        answer = " ".join(relevant_chunks)
+        # Генерация ответа
+        context = " ".join([texts[i] for i in indices[0]])
+        qa_result = qa_model.generate_answer(request.question, context)
 
-        return {
-            "answer": answer,
-            "relevant_chunks": relevant_chunks
-        }
+        return AnswerResponse(
+            answer=qa_result['answer'],
+            relevant_chunks=[texts[i] for i in indices[0]],
+            confidence=qa_result['score']
+        )
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail="File not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
