@@ -4,11 +4,10 @@ import uuid
 import os
 from typing import List
 from models import FileUpload, QuestionRequest, AnswerResponse
-from functions import process_large_file
+from functions import process_large_file, create_vector_db
+from functions import search_in_db
 
 app = FastAPI()
-
-# Временное хранилище файлов (в продакшене используйте S3 или подобное)
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
