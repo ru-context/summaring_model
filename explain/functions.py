@@ -25,7 +25,7 @@ def extract_text_from_file(file_path: str) -> str:
     else:
         raise ValueError(f"Unsupported file format: {ext}")
 
-def process_large_file(file_path: str, chunk_size: int = 1000) -> List[str]:
+def process_large_file(file_path: str, chunk_size: int = 200) -> List[str]:
     """Улучшенная обработка файлов с автоматическим определением формата"""
     try:
         text = extract_text_from_file(file_path)
@@ -59,6 +59,16 @@ def search_in_db(question: str, file_id: str, k: int = 3) -> List[str]:
     distances, indices = index.search(question_embedding, k)
     return [f"Relevant chunk {i+1}" for i in indices[0]]
 
-def chunk_text(text: str, chunk_size: int = 500) -> List[str]:
-    words = text.split()
-    return [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+def chunk_text(text: str, chunk_size: int = 200) -> List[str]:
+    paragraphs = text.split("\n\n")
+    chunks = []
+    current_chunk = []
+    for paragraph in paragraphs:
+        if len(" ".join(current_chunk + [paragraph]).split()) <= chunk_size:
+            current_chunk.append(paragraph)
+        else:
+            chunks.append(" ".join(current_chunk))
+            current_chunk = [paragraph]
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+    return chunks

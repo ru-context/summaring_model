@@ -44,7 +44,7 @@ async def upload_file(file: UploadFile = File(...)):
 
         # Сохраняем данные в векторную БД
         embeddings = model.encode(chunks)
-        index = faiss.IndexFlatL2(embeddings.shape[1])
+        index = faiss.IndexFlatIP(embeddings.shape[1])
         index.add(embeddings)
 
         # Сохраняем ВСЕ данные
@@ -63,22 +63,38 @@ async def upload_file(file: UploadFile = File(...)):
 @app.post("/ask/", response_model=AnswerResponse)
 async def ask_question(request: QuestionRequest):
     try:
-        # Проверяем существование файлов
         db_manager = DatabaseManager()
         texts = db_manager.load_texts(request.file_id)
         index = db_manager.load_index(request.file_id)
 
-        # Остальная логика обработки вопроса...
+        # Увеличиваем k и используем косинусную близость
+        question_embedding = model.encode([request.question])
+        distances, indices = index.search(question_embedding, k=5)  # Больше чанков
+        relevant_chunks = [texts[i] for i in indices[0]]
 
-    except FileNotFoundError as e:
-        available_files = [f for f in os.listdir("database") if f.endswith('.json')]
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": str(e),
-                "available_files": available_files
-            }
+        # Логируем чанки для отладки
+        logging.info(f"Relevant chunks: {relevant_chunks}")
+
+        context = " ".join(relevant_chunks)
+        qa_result = qa_model.generate_answer(request.question, context)
+
+        # Фильтр по уверенности
+        if qa_result["score"] < 0.1:
+            return AnswerResponse(
+                answer="Информация не найдена в документе.",
+                relevant_chunks=relevant_chunks,
+                confidence=qa_result["score"]
+            )
+
+        return AnswerResponse(
+            answer=qa_result["answer"],
+            relevant_chunks=relevant_chunks,
+            confidence=qa_result["score"]
         )
+
+    except Exception as e:
+        logging.error(f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/files/")
 async def list_uploaded_files():
