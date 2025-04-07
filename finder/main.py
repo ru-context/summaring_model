@@ -1,137 +1,148 @@
 import os
 import uuid
-from typing import List
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from typing import Dict
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, String, Text, Integer
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from sentence_transformers import SentenceTransformer, util
+from PyPDF2 import PdfReader
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline
+import faiss
 import numpy as np
 
-app = FastAPI()
-DATABASE_URL = "sqlite:///./files.db"
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+# Инициализация FastAPI
+app = FastAPI(
+    title="PDF QA API",
+    description="API для обработки PDF файлов и вопросно-ответной системы",
+    version="1.0.0"
+)
 
-model = SentenceTransformer('all-MiniLM-L6-v2') # type: ignore
-class FileRecord(Base):
-    __tablename__ = "files"
-    id = Column(String, primary_key=True, index=True)
-    filename = Column(String)
+# Глобальные модели (загружаются один раз при старте)
+embedding_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+qa_model = pipeline(
+    "question-answering",
+    model="deepset/xlm-roberta-base-squad2-distilled",
+    tokenizer="deepset/xlm-roberta-base-squad2-distilled"
+)
 
-class FileChunk(Base):
-    __tablename__ = "file_chunks"
-    id = Column(String, primary_key=True, index=True)
-    file_id = Column(String, index=True)
-    chunk_number = Column(Integer)
-    chunk_text = Column(Text)
-    chunk_embedding = Column(String)
+# Хранилище сессий в памяти (в production замените на базу данных)
+sessions: Dict[str, dict] = {}
 
-Base.metadata.create_all(bind=engine)
-class SearchRequest(BaseModel):
-    file_id: str
-    query_text: str
-    threshold: float = 0.5
+# Модели запросов/ответов
+class QuestionRequest(BaseModel):
+    question: str
 
-class SearchResult(BaseModel):
-    chunk_number: int
-    chunk_text: str
-    similarity_score: float
+class SessionResponse(BaseModel):
+    session_id: str
 
-def split_into_chunks(text: str, chunk_size: int = 500) -> List[str]:
+class AnswerResponse(BaseModel):
+    answer: str
+
+# Вспомогательные функции
+def extract_text_from_pdf(file):
+    try:
+        pdf_reader = PdfReader(file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() or ""
+        return text
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Ошибка при чтении PDF: {str(e)}"
+        )
+
+def create_faiss_index(text_chunks, embeddings):
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings)
+    return index
+
+def split_text_into_chunks(text, chunk_size=500):
     words = text.split()
-    chunks = []
-    current_chunk = []
-    current_length = 0
-
-    for word in words:
-        if current_length + len(word) + 1 > chunk_size and current_chunk:
-            chunks.append(" ".join(current_chunk))
-            current_chunk = []
-            current_length = 0
-        current_chunk.append(word)
-        current_length += len(word) + 1
-
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
-
+    chunks = [' '.join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
     return chunks
 
-def serialize_embedding(embedding: np.ndarray) -> str:
-    return ",".join(map(str, embedding.tolist()))
-
-def deserialize_embedding(embedding_str: str) -> np.ndarray:
-    return np.array(list(map(float, embedding_str.split(","))))
-
-@app.post("/upload/")
-async def upload_file(file: UploadFile = File(...)):
+# API endpoints
+@app.post("/upload/", response_model=SessionResponse)
+async def upload_pdf(file: UploadFile = File(...)):
     try:
-        contents = await file.read()
-        text = contents.decode("utf-8")
-
-        db = SessionLocal()
-        file_id = str(uuid.uuid4())
-        file_record = FileRecord(id=file_id, filename=file.filename)
-        db.add(file_record)
-
-        chunks = split_into_chunks(text)
-        for i, chunk in enumerate(chunks):
-            embedding = model.encode(chunk, convert_to_tensor=False)
-
-            chunk_id = str(uuid.uuid4())
-            chunk_record = FileChunk(
-                id=chunk_id,
-                file_id=file_id,
-                chunk_number=i,
-                chunk_text=chunk,
-                chunk_embedding=serialize_embedding(embedding)
+        # Извлекаем текст из PDF
+        text = extract_text_from_pdf(file.file)
+        if not text:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Не удалось извлечь текст из PDF"
             )
-            db.add(chunk_record)
 
-        db.commit()
-        db.close()
+        # Разбиваем текст на чанки
+        chunks = split_text_into_chunks(text)
 
-        return {"file_id": file_id, "filename": file.filename, "chunks_count": len(chunks)}
+        # Создаем эмбеддинги для чанков
+        embeddings = embedding_model.encode(chunks, convert_to_tensor=False)
+
+        # Создаем FAISS индекс для быстрого поиска
+        index = create_faiss_index(chunks, embeddings)
+
+        # Создаем новую сессию
+        session_id = str(uuid.uuid4())
+        sessions[session_id] = {
+            "text": text,
+            "chunks": chunks,
+            "embeddings": embeddings,
+            "index": index
+        }
+
+        return {"session_id": session_id}
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при обработке файла: {str(e)}"
+        )
 
-@app.post("/search/", response_model=List[SearchResult])
-async def search_text(request: SearchRequest):
+@app.post("/ask/{session_id}", response_model=AnswerResponse)
+async def ask_question(session_id: str, request: QuestionRequest):
+    if session_id not in sessions:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Сессия не найдена"
+        )
+
     try:
-        db = SessionLocal()
-        file = db.query(FileRecord).filter(FileRecord.id == request.file_id).first()
-        if not file:
-            raise HTTPException(status_code=404, detail="File not found")
+        session_data = sessions[session_id]
+        question = request.question
 
-        chunks = db.query(FileChunk).filter(FileChunk.file_id == request.file_id).all()
-        if not chunks:
-            raise HTTPException(status_code=404, detail="No chunks found for this file")
+        # Получаем эмбеддинг вопроса
+        question_embedding = embedding_model.encode([question], convert_to_tensor=False)
 
-        query_embedding = model.encode(request.query_text, convert_to_tensor=False)
-        query_embedding = query_embedding.astype(np.float32)  # Приводим к float32
+        # Ищем наиболее релевантные чанки
+        D, I = session_data["index"].search(question_embedding, k=3)  # top-3 чанка
+        relevant_chunks = [session_data["chunks"][i] for i in I[0]]
+        context = " ".join(relevant_chunks)
 
-        results = []
-        for chunk in chunks:
-            chunk_embedding = deserialize_embedding(chunk.chunk_embedding)
-            chunk_embedding = chunk_embedding.astype(np.float32)
-            similarity = util.pytorch_cos_sim(query_embedding, chunk_embedding).item()
+        # Получаем ответ от модели
+        result = qa_model(question=question, context=context)
 
-            if similarity >= request.threshold:
-                results.append(SearchResult(
-                    chunk_number=chunk.chunk_number,
-                    chunk_text=chunk.chunk_text,
-                    similarity_score=similarity
-                ))
+        return {"answer": result["answer"]}
 
-        results.sort(key=lambda x: x.similarity_score, reverse=True)
-
-        db.close()
-        return results
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при обработке вопроса: {str(e)}"
+        )
+
+@app.delete("/session/{session_id}")
+async def delete_session(session_id: str):
+    if session_id in sessions:
+        del sessions[session_id]
+        return JSONResponse(status_code=status.HTTP_200_OK, content={"message": "Сессия удалена"})
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Сессия не найдена"
+        )
 
 if __name__ == "__main__":
     import uvicorn
