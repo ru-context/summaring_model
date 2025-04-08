@@ -2,16 +2,16 @@ import faiss
 from PyPDF2 import PdfReader
 from fastapi import HTTPException
 
-def extract_text_from_pdf(file):
+def extract_text_from_pdf(file_stream):
     try:
-        pdf_reader = PdfReader(file)
+        pdf_reader = PdfReader(file_stream)
         text = ""
         for page in pdf_reader.pages:
             text += page.extract_text() or ""
         return text
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_400_BAD_REQUEST, # type: ignore
             detail=f"Ошибка при чтении PDF: {str(e)}"
         )
 

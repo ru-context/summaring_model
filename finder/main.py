@@ -19,26 +19,41 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Инициализация моделей
-embedding_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+embedding_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2') # type: ignore
 qa_model = pipeline(
     "question-answering",
     model="deepset/xlm-roberta-base-squad2-distilled",
     tokenizer="deepset/xlm-roberta-base-squad2-distilled"
 )
 
-# Создание таблиц при старте
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(bind=engine)
 
 @app.post("/upload/", response_model=SessionResponse)
 async def upload_pdf(
-    file: UploadFile = File(...),
+    file: UploadFile = File(..., description="PDF файл для обработки"),
     db: DBSession = Depends(get_db)
 ):
+    if not file.filename or not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Файл должен быть в формате PDF"
+        )
+
     try:
-        text = extract_text_from_pdf(file.file)
+        await file.seek(0)
+        if file.size == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Файл пустой"
+            )
+
+        contents = await file.read()
+        from io import BytesIO
+        file_stream = BytesIO(contents)
+
+        text = extract_text_from_pdf(file_stream)
         if not text:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -67,6 +82,7 @@ async def upload_pdf(
             detail=f"Ошибка при обработке файла: {str(e)}"
         )
 
+
 @app.post("/ask/{session_id}", response_model=AnswerResponse)
 async def ask_question(
     session_id: str,
@@ -91,16 +107,12 @@ async def ask_question(
     try:
         question = request.question
         question_embedding = embedding_model.encode([question], convert_to_tensor=False)
-
         index = db_session.get_faiss_index()
         D, I = index.search(question_embedding, k=3)
-
         chunks = json.loads(db_session.chunks)
         relevant_chunks = [chunks[i] for i in I[0]]
         context = " ".join(relevant_chunks)
-
         result = qa_model(question=question, context=context)
-
         return {"answer": result["answer"]}
 
     except Exception as e:
@@ -108,6 +120,7 @@ async def ask_question(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ошибка при обработке вопроса: {str(e)}"
         )
+
 
 @app.delete("/session/{session_id}")
 async def delete_session_endpoint(
@@ -132,6 +145,8 @@ async def delete_session_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Сессия не найдена"
         )
+
+
 
 if __name__ == "__main__":
     import uvicorn
