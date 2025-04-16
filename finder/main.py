@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import FastAPI, UploadFile, File, HTTPException, status, Depends
 from fastapi.responses import JSONResponse
 from functions import extract_text_from_pdf, split_text_into_chunks, create_faiss_index
+from functions import get_faiss_index
 from schemas import QuestionRequest, SessionResponse, AnswerResponse
 from sentence_transformers import SentenceTransformer
 from transformers import pipeline
@@ -62,7 +63,7 @@ async def upload_pdf(
 
         chunks = split_text_into_chunks(text)
         embeddings = embedding_model.encode(chunks, convert_to_tensor=False)
-        index = create_faiss_index(chunks, embeddings)
+        index = create_faiss_index(embeddings)
 
         db_session = create_session(
             db=db,
@@ -109,6 +110,9 @@ async def ask_question(
         question_embedding = embedding_model.encode([question], convert_to_tensor=False)
         index = db_session.get_faiss_index()
         D, I = index.search(question_embedding, k=3)
+        if len(I) == 0:
+            raise HTTPException(status_code=404, detail="No relevant chunks found")
+        
         chunks = json.loads(db_session.chunks)
         relevant_chunks = [chunks[i] for i in I[0]]
         context = " ".join(relevant_chunks)

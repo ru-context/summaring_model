@@ -16,7 +16,7 @@ def create_session(db: Session, text: str, chunks: list[str], embeddings, index)
     return db_session
 
 def get_session(db: Session, session_id: str):
-    return db.query(Session).filter(Session.id == session_id).first()
+    return db.query(Session).filter(Session.id == str(session_id)).first()
 
 def delete_session(db: Session, session_id: str):
     db_session = get_session(db, session_id)
