@@ -1,8 +1,0 @@
-fastapi
-uvicorn
-transformers
-sentence-transformers
-faiss-cpu
-PyMuPDF
-python-docx
-
