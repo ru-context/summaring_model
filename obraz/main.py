@@ -4,9 +4,11 @@ from fastapi.responses import JSONResponse
 from functions import (
     generate_file_id,
     extract_text_from_file,
-    save_extracted_text
+    save_extracted_text,
+    get_text_by_file_id,
+    summarize_text
 )
-from schemas import UploadResponse
+from schemas import UploadResponse, SummarizeResponse
 
 app = FastAPI(title="File Upload and Text Extraction API")
 UPLOAD_DIR = "uploads"
@@ -38,6 +40,33 @@ async def upload_file(file: UploadFile = File(...)):
 async def root():
     """Root endpoint to check if the API is running."""
     return {"message": "File Upload and Text Extraction API is running"}
+
+
+@app.get("/summarize/{file_id}", response_model=SummarizeResponse)
+async def summarize_file(file_id: str, max_length: int = 150):
+    """
+    Суммаризирует текст из файла по его file_id.
+    Параметр max_length определяет максимальную длину суммаризации.
+    """
+    try:
+        # Получаем текст из файла
+        text = get_text_by_file_id(file_id, UPLOAD_DIR)
+        
+        # Суммаризируем текст
+        summary = summarize_text(text, max_length)
+        
+        return SummarizeResponse(
+            file_id=file_id,
+            summary=summary,
+            success=True,
+            message="Text successfully summarized"
+        )
+    
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error summarizing text: {str(e)}")
 
 
 if __name__ == "__main__":
