@@ -1,5 +1,6 @@
 import os
 import uuid
+import logging 
 import torch 
 import io
 import PyPDF2
@@ -89,17 +90,19 @@ def summarize_text(text: str, max_length: int = 150) -> str:
 class SummarizationEnsemble:
     def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
+        self.logger = logging.getLogger(__name__)
+        logging.basicConfig(level=logging.INFO)
         self.models = self._load_models()
         
     def _load_models(self) -> List[Dict]:
-        """Загрузка предобученных моделей с более оптимальными весами"""
+        """Загрузка только проверенных моделей для русского/английского"""
         models = [
             {
                 'name': 'facebook/bart-large-cnn',
                 'model': AutoModelForSeq2SeqLM.from_pretrained('facebook/bart-large-cnn'),
                 'tokenizer': AutoTokenizer.from_pretrained('facebook/bart-large-cnn'),
                 'lang': 'en',
-                'weight': 0.5,
+                'weight': 0.6,
                 'max_input': 1024
             },
             {
@@ -107,108 +110,85 @@ class SummarizationEnsemble:
                 'model': AutoModelForSeq2SeqLM.from_pretrained('IlyaGusev/mbart_ru_sum_gazeta'),
                 'tokenizer': AutoTokenizer.from_pretrained('IlyaGusev/mbart_ru_sum_gazeta'),
                 'lang': 'ru',
-                'weight': 0.5,
+                'weight': 0.6,
                 'max_input': 1024
-            },
-            {
-                'name': 'google/mt5-base',
-                'model': AutoModelForSeq2SeqLM.from_pretrained('google/mt5-base'),
-                'tokenizer': AutoTokenizer.from_pretrained('google/mt5-base'),
-                'lang': 'multi',
-                'weight': 0.3,
-                'max_input': 512
             }
+            # Убрана проблемная google/mt5-base
         ]
         
         for m in models:
             m['model'] = m['model'].to(self.device)
-            m['model'].eval()  # Переводим в режим inference
+            m['model'].eval()
             
         return models
-
-    def detect_language(self, text: str) -> str:
-        """Улучшенное определение языка"""
-        from langdetect import detect
-        try:
-            return detect(text)
-        except:
-            # Fallback на простой метод, если langdetect не сработал
-            ru_chars = len([c for c in text.lower() if 'а' <= c <= 'я'])
-            en_chars = len([c for c in text.lower() if 'a' <= c <= 'z'])
-            return 'ru' if ru_chars > en_chars else 'en'
+    
+    def _prepare_text(self, text: str, model_name: str) -> str:
+        """Предобработка текста для разных моделей"""
+        if 'mbart' in model_name:
+            return f"ru_RU {text}"  # Языковой префикс для mBART
+        return text
     
     def summarize_single(self, text: str, model_info: Dict, params: dict) -> str:
-        """Генерация суммаризации одной моделью"""
+        """Улучшенная генерация суммаризации"""
         tokenizer = model_info['tokenizer']
         model = model_info['model']
         
+        # Специальная обработка для русских текстов
+        prepared_text = self._prepare_text(text, model_info['name'])
+        
         inputs = tokenizer(
-            text,
-            max_length=model_info.get('max_input', 512),
+            prepared_text,
+            max_length=model_info['max_input'],
             truncation=True,
             return_tensors="pt"
         ).to(self.device)
         
-        summary_ids = model.generate(
-            inputs["input_ids"],
-            max_length=params['max_length'],
-            min_length=params['min_length'],
-            length_penalty=params['length_penalty'],
-            num_beams=params['num_beams'],
-            early_stopping=True
-        )
+        # Параметры генерации для избежания артефактов
+        generate_kwargs = {
+            'max_length': params['max_length'],
+            'min_length': params['min_length'],
+            'num_beams': params['num_beams'],
+            'length_penalty': params['length_penalty'],
+            'early_stopping': True,
+            'no_repeat_ngram_size': 3,  # Предотвращает повторения
+            'bad_words_ids': [[tokenizer.eos_token_id]],  # Исключает спецтокены
+        }
         
-        return tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+        # Особые настройки для mBART
+        if 'mbart' in model_info['name']:
+            generate_kwargs['forced_bos_token_id'] = tokenizer.lang_code_to_id['ru_RU']
+        
+        output = model.generate(**inputs, **generate_kwargs)
+        return tokenizer.decode(output[0], skip_special_tokens=True)
     
     def summarize(self, text: str, language: str = 'auto', **params) -> Dict:
-        """
-        Ансамблевая суммаризация
-        
-        Возвращает:
-        {
-            "summary": итоговая суммаризация,
-            "model_used": имя лучшей модели,
-            "language_detected": определенный язык,
-            "all_summaries": все сгенерированные суммаризации
-        }
-        """
-        import time
+        """Упрощенный и надежный ансамбль"""
+        import time 
         start_time = time.time()
-        
-        # Определяем язык, если не указан явно
         lang = self.detect_language(text) if language == 'auto' else language
-        lang = 'ru' if lang in ['ru', 'uk', 'be'] else 'en'  # Группируем славянские языки
         
-        summaries = []
-        model_names = []
-        
-        for model_info in self.models:
-            if model_info['lang'] in [lang, 'multi']:
+        results = []
+        for model in self.models:
+            if model['lang'] in [lang, 'multi']:
                 try:
-                    summary = self.summarize_single(text, model_info, params)
-                    summaries.append(summary)
-                    model_names.append(model_info['name'])
+                    summary = self.summarize_single(text, model, params)
+                    results.append({
+                        'summary': summary,
+                        'model': model['name'],
+                        'weight': model['weight']
+                    })
                 except Exception as e:
-                    print(f"Error with {model_info['name']}: {str(e)}")
+                    self.logger.error(f"{model['name']} failed: {str(e)}")
         
-        if not summaries:
-            raise ValueError("No suitable models found for the detected language")
+        if not results:
+            raise ValueError("No models could process this text")
         
-        # Выбираем лучшую summary по комбинации длины и веса модели
-        best_idx = 0
-        best_score = 0
-        for i, (summary, model_name) in enumerate(zip(summaries, model_names)):
-            model_weight = next(m['weight'] for m in self.models if m['name'] == model_name)
-            # Оценка: вес модели * нормализованная длина summary
-            score = model_weight * (len(summary) / params['max_length'])
-            if score > best_score:
-                best_score = score
-                best_idx = i
+        # Выбираем результат с максимальным весом
+        best_result = max(results, key=lambda x: x['weight'])
         
         return {
-            "summary": summaries[best_idx],
-            "model_used": model_names[best_idx],
+            "summary": best_result['summary'],
+            "model_used": best_result['model'],
             "language_detected": lang,
-            "processing_time_ms": (time.time() - start_time) * 1000,
-            "all_summaries": list(zip(model_names, summaries))  # Для отладки
+            "processing_time_ms": (time.time() - start_time) * 1000
         }
