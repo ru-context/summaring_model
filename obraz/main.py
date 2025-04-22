@@ -1,4 +1,7 @@
 import os
+import torch 
+from enum import Enum
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
 from functions import (
@@ -8,7 +11,15 @@ from functions import (
     get_text_by_file_id,
     summarize_text
 )
+
+from functions import (
+    SummarizationEnsemble
+)
+
+ensemble = SummarizationEnsemble()
+
 from schemas import UploadResponse, SummarizeResponse
+from schemas import SummarizationResponse, SummarizationEnsemble, SummarizationRequest
 
 app = FastAPI(title="File Upload and Text Extraction API")
 UPLOAD_DIR = "uploads"
@@ -68,6 +79,41 @@ async def summarize_file(file_id: str, max_length: int = 150):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error summarizing text: {str(e)}")
 
+
+@app.post("/summarize", response_model=SummarizationResponse)
+async def summarize_text(request: SummarizationRequest):
+    try:
+        params = {
+            "max_length": request.max_length,
+            "min_length": request.min_length,
+            "num_beams": request.num_beams,
+            "length_penalty": request.length_penalty
+        }
+        
+        result = ensemble.summarize(
+            text=request.text,
+            language=request.language.value,
+            **params
+        )
+        
+        return {
+            "summary": result["summary"],
+            "model_used": result["model_used"],
+            "language_detected": result["language_detected"],
+            "processing_time_ms": result["processing_time_ms"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/models")
+async def get_loaded_models():
+    """Возвращает список загруженных моделей и их параметры"""
+    return [{
+        "name": m["name"],
+        "language": m["lang"],
+        "weight": m["weight"],
+        "max_input_length": m.get("max_input", 512)
+    } for m in ensemble.models]
 
 if __name__ == "__main__":
     import uvicorn
